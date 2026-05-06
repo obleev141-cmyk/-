@@ -11,26 +11,22 @@ from PIL import Image, ImageDraw
 from thefuzz import process
 
 # --- ИНТЕРФЕЙС STREAMLIT ---
-st.set_page_config(page_title="Бот-Конвертер")
-st.title("📅 График: Фото ➔ Excel ➔ Календарь")
+st.set_page_config(page_title="Конвертер Графиков")
+st.title("🤖 Бот: Фото ➔ Excel")
 
-# Индикатор загрузки для пользователя
-if 'ready' not in st.session_state:
-    with st.spinner("⏳ Первая загрузка нейросети (3-5 минут)..."):
-        try:
-            @st.cache_resource
-            def load_reader():
-                return easyocr.Reader(['ru', 'en'], gpu=False)
-            reader_obj = load_reader()
-            st.session_state['ready'] = True
-            st.success("✅ Нейросеть готова к работе!")
-        except Exception as e:
-            st.error(f"Ошибка при запуске: {e}")
+# Статус загрузки
+status = st.empty()
+status.info("⏳ Загрузка системы... Подождите пару минут.")
 
-# Данные бота
+# Настройки бота
 API_TOKEN = "8646138607:AAEkoT_Jj_zixGYTti_r1fIjQOKH5_H45-U"
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
+
+# Кэшируем нейросеть для экономии памяти
+@st.cache_resource
+def get_ocr():
+    return easyocr.Reader(['ru', 'en'], gpu=False)
 
 class Form(StatesGroup):
     waiting_for_data = State()
@@ -38,50 +34,48 @@ class Form(StatesGroup):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await message.answer("👋 Привет! Пришли фото графика. Я сделаю из него Excel и календарь.")
+    await message.answer("👋 Привет! Пришли фото графика. Я сделаю из него таблицу Excel и календарь.")
     await state.set_state(Form.waiting_for_data)
 
 @dp.message(Form.waiting_for_data, F.photo)
 async def handle_photo(message: types.Message, state: FSMContext):
     photo = message.photo[-1]
-    photo_path = f"img_{photo.file_id}.jpg"
-    await bot.download_file((await bot.get_file(photo.file_id)).file_path, photo_path)
+    path = f"img_{photo.file_id}.jpg"
+    await bot.download_file((await bot.get_file(photo.file_id)).file_path, path)
     
-    msg = await message.answer("⚙️ Распознаю таблицу и создаю Excel-файл...")
+    msg = await message.answer("🔍 Читаю текст и создаю Excel...")
     
     try:
-        reader = easyocr.Reader(['ru', 'en'], gpu=False)
-        results = reader.readtext(photo_path)
+        reader = get_ocr()
+        results = reader.readtext(path)
         
-        # Группировка по строкам
+        # Группируем текст по строкам (Y-координата)
         lines = {}
         for (bbox, text, prob) in results:
-            y_center = (bbox[0][1] + bbox[2][1]) // 2
+            y = (bbox[0][1] + bbox[2][1]) // 2
             found = False
             for line_y in lines.keys():
-                if abs(line_y - y_center) < 20:
+                if abs(line_y - y) < 20:
                     lines[line_y].append((bbox[0][0], text))
                     found = True
                     break
-            if not found:
-                lines[y_center] = [(bbox[0][0], text)]
+            if not found: lines[y] = [(bbox[0][0], text)]
 
         table_data = []
         for y in sorted(lines.keys()):
-            row = [t[1] for t in sorted(lines[y], key=lambda x: x[0])]
-            table_data.append(row)
+            table_data.append([t[1] for t in sorted(lines[y], key=lambda x: x[0])])
         
         excel_path = f"table_{message.from_user.id}.xlsx"
         pd.DataFrame(table_data).to_excel(excel_path, index=False, header=False)
         
-        await message.answer_document(types.FSInputFile(excel_path), caption="📊 Вот твоя таблица из фото!")
+        await message.answer_document(types.FSInputFile(excel_path), caption="📊 Твой график в Excel!")
         await state.update_data(raw_rows=table_data, excel_path=excel_path)
-        await msg.edit_text("✅ Распознано! Теперь введи фамилию для картинки.")
+        await msg.edit_text("✅ Готово! Теперь введи фамилию.")
         await state.set_state(Form.waiting_for_name)
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"Ошибка: {e}")
     finally:
-        if os.path.exists(photo_path): os.remove(photo_path)
+        if os.path.exists(path): os.remove(path)
 
 @dp.message(Form.waiting_for_name)
 async def handle_name(message: types.Message, state: FSMContext):
@@ -101,35 +95,37 @@ async def handle_name(message: types.Message, state: FSMContext):
         return
 
     try:
+        # Извлекаем только смены (где есть цифры)
         schedule = [x for x in target_row if x != fio_final and any(c.isdigit() for c in x)]
         
-        # Отрисовка календаря
-        cell_w, cell_h = 90, 80
-        img = Image.new('RGB', (cell_w*7 + 30, cell_h*6 + 120), color='#1C1E21')
+        # Рисуем календарь
+        w, h = 660, 600
+        img = Image.new('RGB', (w, h), color='#1C1E21')
         draw = ImageDraw.Draw(img)
-        draw.text((15, 20), f"СОТРУДНИК: {fio_final.upper()}", fill='#FFFFFF')
+        draw.text((20, 20), f"СОТРУДНИК: {fio_final.upper()}", fill='#FFFFFF')
 
         for i in range(min(31, len(schedule))):
             r, c = i // 7, i % 7
-            x, y = 15 + c*cell_w, 120 + r*cell_h
+            x, y = 20 + c*90, 100 + r*80
             val = schedule[i]
             is_work = any(c.isdigit() for c in val)
             color = "#FF7043" if is_work else "#4CAF50"
-            draw.rounded_rectangle([x+5, y+30, x+85, y+65], radius=6, fill=color)
-            draw.text((x+10, y+5), str(i+1), fill='#FFFFFF')
-            draw.text((x+15, y+38), val[:7] if is_work else "ВЫХ", fill='#FFFFFF')
+            draw.rounded_rectangle([x, y+25, x+80, y+55], radius=5, fill=color)
+            draw.text((x+5, y), str(i+1), fill='#9DA0A5')
+            draw.text((x+10, y+32), val[:7] if is_work else "ВЫХ", fill='#FFFFFF')
 
-        img_path = f"cal_{message.from_user.id}.png"
-        img.save(img_path)
-        await message.answer_photo(types.FSInputFile(img_path))
-        os.remove(img_path)
+        img_p = f"cal_{message.from_user.id}.png"
+        img.save(img_p)
+        await message.answer_photo(types.FSInputFile(img_p))
+        os.remove(img_p)
     except Exception as e:
-        await message.answer(f"Ошибка графики: {e}")
+        await message.answer(f"Ошибка картинки: {e}")
     finally:
         if os.path.exists(data.get('excel_path', '')): os.remove(data.get('excel_path'))
         await state.clear()
 
 async def main():
+    status.success("✅ Бот запущен! Пиши /start в Telegram.")
     await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
