@@ -8,14 +8,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from PIL import Image, ImageDraw
 
-# --- ИНТЕРФЕЙС STREAMLIT ---
-st.title("🤖 Бот-График")
-st.success("Статус: Работает")
-st.info("Не закрывай эту страницу, чтобы бот не отключился.")
+# --- ИНТЕРФЕЙС ---
+st.title("🤖 Бот-График: СТАТУС OK")
+st.success("Бот активен. Теперь он понимает выходные!")
 
-# --- КОНФИГУРАЦИЯ (НОВЫЙ ТОКЕН) ---
 API_TOKEN = "8646138607:AAEkoT_Jj_zixGYTti_r1fIjQOKH5_H45-U"
-
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
@@ -25,22 +22,17 @@ class Form(StatesGroup):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await message.answer("👋 Привет! Пришли мне файл Excel (.xlsx) с графиком.")
+    await message.answer("👋 Привет! Пришли Excel-файл с графиком, и я сделаю удобную картинку.")
     await state.set_state(Form.waiting_for_file)
 
 @dp.message(Form.waiting_for_file, F.document)
 async def handle_document(message: types.Message, state: FSMContext):
-    if not message.document.file_name.lower().endswith(('.xlsx', '.xls')):
-        await message.answer("❌ Пожалуйста, пришли именно файл Excel.")
-        return
-    
     file_id = message.document.file_id
     file = await bot.get_file(file_id)
     file_name = f"{file_id}.xlsx"
     await bot.download_file(file.file_path, file_name)
-    
     await state.update_data(file_path=file_name)
-    await message.answer("✅ Файл получен! Теперь напиши фамилию сотрудника.")
+    await message.answer("✅ Файл загружен! Теперь напиши фамилию.")
     await state.set_state(Form.waiting_for_name)
 
 @dp.message(Form.waiting_for_name)
@@ -50,7 +42,13 @@ async def handle_name(message: types.Message, state: FSMContext):
     name = message.text.strip()
 
     try:
-        df = pd.read_excel(file_path)
+        # Читаем файл и ищем строку с заголовками
+        df_raw = pd.read_excel(file_path, header=None)
+        header_idx = df_raw.count(axis=1).idxmax()
+        df = df_raw.copy()
+        df.columns = df.iloc[header_idx]
+        df = df.drop(range(header_idx + 1)).reset_index(drop=True)
+        
         col_fio = df.columns[0]
         result = df[df[col_fio].astype(str).str.contains(name, case=False, na=False)]
 
@@ -58,40 +56,50 @@ async def handle_name(message: types.Message, state: FSMContext):
             await message.answer(f"❌ Работник '{name}' не найден.")
         else:
             row = result.iloc[0]
-            # Создаем картинку
-            width = 600
-            height = 120 + (len(df.columns) * 40)
-            img = Image.new('RGB', (width, height), color='#FFFFFF')
+            
+            # Отбираем только колонки с датами (где есть названия)
+            valid_cols = [c for c in df.columns if pd.notna(c) and str(c).strip() != ""]
+            
+            # Настройки картинки
+            width = 750
+            height = 140 + (len(valid_cols) * 45)
+            img = Image.new('RGB', (width, height), color='#121212') # Глубокий черный
             draw = ImageDraw.Draw(img)
             
-            y = 30
-            draw.text((40, y), f"ГРАФИК: {row[col_fio]}", fill='#000000')
-            y += 50
+            # Заголовок
+            draw.text((50, 40), f"ГРАФИК: {str(row[col_fio]).upper()}", fill='#00E676')
+            draw.line((50, 90, 700, 90), fill='#333333', width=1)
             
-            for col in df.columns[1:]:
-                val = str(row[col]) if pd.notna(row[col]) else "-"
-                draw.text((40, y), f"• {col}: {val}", fill='#333333')
-                y += 35
+            y = 120
+            for col in valid_cols[1:]: # Пропускаем колонку ФИО
+                val = str(row[col]).strip()
+                
+                # ЛОГИКА ВЫХОДНЫХ: если пусто, NaN или прочерк
+                if not val or val.lower() in ['nan', '-', 'none', '']:
+                    display_text = "ВЫХОДНОЙ"
+                    text_color = "#FF5252" # Красный для выходного
+                else:
+                    display_text = val
+                    text_color = "#FFFFFF" # Белый для рабочих смен
+                
+                # Рисуем дату (слева) и статус (справа)
+                draw.text((50, y), f"{col}:", fill='#9E9E9E')
+                draw.text((250, y), display_text, fill=text_color)
+                y += 40
             
-            img_path = f"graph_{message.from_user.id}.png"
+            img_path = f"res_{message.from_user.id}.png"
             img.save(img_path)
-            
-            await message.answer_photo(types.FSInputFile(img_path), caption="Ваш график готов!")
+            await message.answer_photo(types.FSInputFile(img_path), caption=f"Готово! Пустые дни отмечены как выходные.")
             if os.path.exists(img_path): os.remove(img_path)
 
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {e}")
+        await message.answer(f"⚠️ Ошибка обработки: {e}")
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        if file_path and os.path.exists(file_path): os.remove(file_path)
         await state.clear()
 
 async def main():
-    # handle_signals=False исправляет ошибку из твоих логов
     await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        st.error(f"Бот упал: {e}")
+    asyncio.run(main())
