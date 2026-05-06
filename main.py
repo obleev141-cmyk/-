@@ -9,10 +9,9 @@ from aiogram.fsm.state import State, StatesGroup
 from PIL import Image, ImageDraw
 
 # --- ИНТЕРФЕЙС STREAMLIT ---
-st.title("🤖 Бот-Календарь")
-st.info("Статус: Ожидание файла...")
+st.title("📅 Бот-Календарь v2.0")
+st.success("Статус: Оптимизирован")
 
-# Настройки
 API_TOKEN = "8646138607:AAEkoT_Jj_zixGYTti_r1fIjQOKH5_H45-U"
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -23,16 +22,16 @@ class Form(StatesGroup):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await message.answer("👋 Привет! Пришли файл с графиком, и я нарисую календарь.")
+    await message.answer("👋 Привет! Пришли файл Excel, и я нарисую компактный календарь.")
     await state.set_state(Form.waiting_for_file)
 
 @dp.message(Form.waiting_for_file, F.document)
 async def handle_document(message: types.Message, state: FSMContext):
     file_id = message.document.file_id
-    file_name = f"{file_id}.xlsx"
-    await bot.download_file((await bot.get_file(file_id)).file_path, file_name)
-    await state.update_data(file_path=file_name)
-    await message.answer("✅ Файл принят. Напиши фамилию.")
+    file_path = f"{file_id}.xlsx"
+    await bot.download_file((await bot.get_file(file_id)).file_path, file_path)
+    await state.update_data(file_path=file_path)
+    await message.answer("✅ Файл загружен. Введи фамилию сотрудника.")
     await state.set_state(Form.waiting_for_name)
 
 @dp.message(Form.waiting_for_name)
@@ -52,57 +51,60 @@ async def handle_name(message: types.Message, state: FSMContext):
         result = df[df[col_fio].astype(str).str.contains(name, case=False, na=False)]
 
         if result.empty:
-            await message.answer("❌ Сотрудник не найден.")
+            await message.answer(f"❌ '{name}' не найден.")
         else:
             row = result.iloc[0]
-            dates = [c for c in df.columns if str(c).replace('.','').isdigit() or "май" in str(c).lower()]
+            # Берем только колонки, похожие на даты
+            dates = [c for c in df.columns if any(char.isdigit() for char in str(c))][:31]
             
-            # РИСУЕМ КАЛЕНДАРЬ (стиль "Моя работа")
-            cell_size = 100
-            padding = 20
-            cols_count = 7
-            rows_count = (len(dates) // 7) + 1
-            
-            img_w = (cell_size * cols_count) + (padding * 2)
-            img_h = (cell_size * rows_count) + 150
+            # РАЗМЕРЫ (Компактный вид)
+            cell_w, cell_h = 90, 80
+            padding = 15
+            img_w = (cell_w * 7) + (padding * 2)
+            img_h = (cell_h * 6) + 120
             
             img = Image.new('RGB', (img_w, img_h), color='#1C1E21')
             draw = ImageDraw.Draw(img)
             
-            # Заголовок (Май 2026)
-            draw.text((padding, 30), f"{name.upper()}", fill='#FFFFFF')
-            draw.text((padding, 70), "МАЙ 2026", fill='#9DA0A5')
+            # Шапка
+            draw.text((padding, 20), f"{name.upper()}", fill='#FFFFFF')
+            draw.text((padding, 50), "МАЙ 2026", fill='#9DA0A5')
             
             # Дни недели
-            weekdays = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
-            for i, day in enumerate(weekdays):
-                draw.text((padding + i*cell_size + 30, 110), day, fill='#5E6166')
+            days = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+            for i, d in enumerate(days):
+                draw.text((padding + i*cell_w + 30, 85), d, fill='#5E6166')
 
-            # Сетка дат
+            # Сетка
             for i, date_col in enumerate(dates):
-                row_idx = i // 7
-                col_idx = i % 7
-                x = padding + col_idx * cell_size
-                y = 150 + row_idx * cell_size
+                r, c = i // 7, i % 7
+                x = padding + c * cell_w
+                y = 120 + r * cell_h
                 
-                # Число
-                draw.text((x + 10, y + 10), str(date_col).split('.')[0], fill='#FFFFFF')
+                # Число (день месяца)
+                day_num = str(date_col).split('.')[0].split(' ')[0]
+                draw.text((x + 10, y + 5), day_num, fill='#FFFFFF')
                 
-                # Смена (если есть)
-                val = str(row[date_col]).strip()
-                if val and val.lower() not in ['nan', '-', '']:
-                    # Рисуем цветную плашку для смены
-                    color = "#4CAF50" if "12" in val or "11" in val else "#FF7043"
-                    draw.rounded_rectangle([x+10, y+40, x+90, y+70], radius=5, fill=color)
-                    draw.text((x+20, y+45), val, fill='#FFFFFF')
+                val = str(row[date_col]).strip().lower()
+                is_work = val and val not in ['nan', '-', '', 'выходной']
+                
+                # Цвет плашки: Оранжевый - работа, Зеленый - выходной
+                rect_color = "#FF7043" if is_work else "#4CAF50"
+                draw.rounded_rectangle([x+5, y+30, x+85, y+65], radius=6, fill=rect_color)
+                
+                # Текст внутри плашки
+                display_val = str(row[date_col]) if is_work else "ВЫХ"
+                # Обрезаем длинные смены для компактности
+                if len(display_val) > 8: display_val = display_val[:7] + ".."
+                draw.text((x+15, y+38), display_val, fill='#FFFFFF')
             
-            img_path = f"cal_{message.from_user.id}.png"
+            img_path = f"compact_{message.from_user.id}.png"
             img.save(img_path)
             await message.answer_photo(types.FSInputFile(img_path))
             if os.path.exists(img_path): os.remove(img_path)
 
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"⚠️ Ошибка: {e}")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
         await state.clear()
