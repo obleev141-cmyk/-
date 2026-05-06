@@ -8,16 +8,15 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from PIL import Image, ImageDraw
+from thefuzz import process # Для нечеткого поиска фамилий
 
-# --- ИНТЕРФЕЙС STREAMLIT ---
-st.title("📅 Бот-График: Фото + Excel")
-st.success("Статус: Работает")
+# --- ИНТЕРФЕЙС ---
+st.title("📅 Бот-График: Умный поиск")
 
 API_TOKEN = "8646138607:AAEkoT_Jj_zixGYTti_r1fIjQOKH5_H45-U"
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Инициализация OCR (сканера)
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['ru', 'en'])
@@ -30,97 +29,78 @@ class Form(StatesGroup):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await message.answer("👋 Привет! Пришли **фото графика** или **Excel-файл**.")
+    await message.answer("👋 Привет! Пришли фото графика. Я постараюсь распознать фамилии, даже если фото не очень четкое.")
     await state.set_state(Form.waiting_for_data)
 
-# ОБРАБОТКА ФОТО (OCR)
 @dp.message(Form.waiting_for_data, F.photo)
 async def handle_photo(message: types.Message, state: FSMContext):
     photo = message.photo[-1]
     file_path = f"img_{photo.file_id}.jpg"
     await bot.download_file((await bot.get_file(photo.file_id)).file_path, file_path)
     
-    msg = await message.answer("🔍 Сканирую фото... (первый раз может занять минуту)")
+    msg = await message.answer("🔍 Читаю фамилии на фото...")
     
-    # Распознаем текст и пытаемся создать таблицу
+    # Распознаем текст
     results = reader.readtext(file_path, detail=0)
-    df_temp = pd.DataFrame([results]) # Упрощенная сборка
+    
+    # Пытаемся собрать данные. Если это фото, мы просто берем все найденные слова
+    # и превращаем их в длинный список для поиска.
+    df_temp = pd.DataFrame({'text': results})
     
     excel_path = f"temp_{message.from_user.id}.xlsx"
     df_temp.to_excel(excel_path, index=False)
     
-    await state.update_data(file_path=excel_path)
+    await state.update_data(file_path=excel_path, raw_text=results)
     os.remove(file_path)
-    await msg.edit_text("✅ Фото распознано! Введи фамилию.")
-    await state.set_state(Form.waiting_for_name)
-
-# ОБРАБОТКА EXCEL
-@dp.message(Form.waiting_for_data, F.document)
-async def handle_document(message: types.Message, state: FSMContext):
-    file_id = message.document.file_id
-    file_path = f"{file_id}.xlsx"
-    await bot.download_file((await bot.get_file(file_id)).file_path, file_path)
-    await state.update_data(file_path=file_path)
-    await message.answer("✅ Файл принят. Введи фамилию.")
+    await msg.edit_text("✅ Текст считан! Введи фамилию для поиска.")
     await state.set_state(Form.waiting_for_name)
 
 @dp.message(Form.waiting_for_name)
 async def handle_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     file_path = data.get('file_path')
-    name = message.text.strip()
+    raw_text = data.get('raw_text', [])
+    search_name = message.text.strip()
 
     try:
-        df_raw = pd.read_excel(file_path, header=None)
-        header_idx = df_raw.count(axis=1).idxmax()
-        df = df_raw.iloc[header_idx:].copy()
-        df.columns = df.iloc[0]
-        df = df[1:].reset_index(drop=True)
-        
-        col_fio = df.columns[0]
-        result = df[df[col_fio].astype(str).str.contains(name, case=False, na=False)]
+        # НЕЧЕТКИЙ ПОИСК: ищем самое похожее слово среди распознанных
+        # score_cutoff=60 означает, что совпадение должно быть минимум на 60%
+        best_match = process.extractOne(search_name, raw_text, score_cutoff=60)
 
-        if result.empty:
-            await message.answer(f"❌ '{name}' не найден.")
+        if not best_match:
+            await message.answer(f"❌ Не удалось найти фамилию '{search_name}' на фото. Попробуй сфотографировать четче или напиши фамилию иначе.")
         else:
-            row = result.iloc[0]
-            dates = [c for c in df.columns if any(char.isdigit() for char in str(c))][:31]
+            found_name = best_match[0]
+            await message.answer(f"🔎 Нашел похожее на фото: **{found_name}** (совпадение {best_match[1]}%)")
             
-            # РАЗМЕРЫ
-            cell_w, cell_h = 90, 80
-            padding = 15
-            img = Image.new('RGB', (cell_w*7 + padding*2, cell_h*6 + 120), color='#1C1E21')
+            # Далее идет твоя логика отрисовки календаря
+            # Для фото-режима мы просто выведем ближайшие 10 слов после фамилии как смены
+            idx = raw_text.index(found_name)
+            schedule = raw_text[idx+1 : idx+32] # Берем следующие 31 слово как дни
+            
+            # Компактная отрисовка (упрощенная для фото)
+            img = Image.new('RGB', (800, 600), color='#1C1E21')
             draw = ImageDraw.Draw(img)
+            draw.text((20, 20), f"ГРАФИК: {found_name.upper()}", fill='#FFFFFF')
             
-            draw.text((padding, 20), f"{name.upper()}", fill='#FFFFFF')
-            draw.text((padding, 50), "ГРАФИК НА МЕСЯЦ", fill='#9DA0A5')
-            
-            days = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
-            for i, d in enumerate(days):
-                draw.text((padding + i*cell_w + 30, 85), d, fill='#5E6166')
-
-            for i, date_col in enumerate(dates):
-                r, c = i // 7, i % 7
-                x, y = padding + c*cell_w, 120 + r*cell_h
+            y = 80
+            x = 20
+            for i, day_val in enumerate(schedule):
+                is_work = any(char.isdigit() for char in day_val)
+                color = "#FF7043" if is_work else "#4CAF50"
                 
-                day_num = str(date_col).split('.')[0].split(' ')[0]
-                draw.text((x + 10, y + 5), day_num, fill='#FFFFFF')
+                draw.rectangle([x, y, x+100, y+40], fill=color)
+                draw.text((x+5, y+10), f"{i+1}: {day_val[:8]}", fill='#FFFFFF')
                 
-                val = str(row[date_col]).strip().lower()
-                # Если ячейка не пустая и не "выходной" — это работа
-                is_work = val and val not in ['nan', '-', '', 'выходной', 'в']
-                
-                rect_color = "#FF7043" if is_work else "#4CAF50" # Оранж - работа, Зеленый - вых
-                draw.rounded_rectangle([x+5, y+30, x+85, y+65], radius=6, fill=rect_color)
-                
-                display_val = str(row[date_col]) if is_work else "ВЫХ"
-                if len(display_val) > 8: display_val = display_val[:7] + ".."
-                draw.text((x+15, y+38), display_val, fill='#FFFFFF')
+                x += 110
+                if (i+1) % 7 == 0:
+                    x = 20
+                    y += 50
             
             img_path = f"res_{message.from_user.id}.png"
             img.save(img_path)
             await message.answer_photo(types.FSInputFile(img_path))
-            if os.path.exists(img_path): os.remove(img_path)
+            os.remove(img_path)
 
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {e}")
