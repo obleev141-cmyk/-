@@ -1,0 +1,5 @@
+aiogram
+pandas
+openpyxl
+pillow
+streamlit
