@@ -1,8 +1,7 @@
 aiogram
 pandas
 openpyxl
-pillow
-streamlit
 easyocr
 opencv-python-headless
 thefuzz
+streamlit
