@@ -1,7 +1,9 @@
-aiogram
+paddleocr
+paddlepaddle
+thefuzz
 pandas
 openpyxl
-easyocr
-opencv-python-headless
-thefuzz
+aiogram
 streamlit
+pillow
+
